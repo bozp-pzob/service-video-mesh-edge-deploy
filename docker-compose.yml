@@ -1,0 +1,119 @@
+# service-video-mesh-edge — three-container stack: Caddy for TLS, an
+# edge-node that handles control-plane chatter with the leader, and a
+# moq-relay attached to the leader's cluster root as a peer.
+#
+# Network shape:
+#   tcp/80           Caddy        LE HTTP-01 challenge
+#   tcp/443          Caddy → edge-node:8080 (only /v1/* is wired)
+#   udp/4443         moq-relay    QUIC / WebTransport from viewers
+#
+# All three secrets the edge needs are minted by the leader and
+# fetched at boot:
+#   /data/jwks/<kid>.jwk    Track-B verify keys (mirrored from /v1/jwks)
+#   /data/cluster.jwt       Cluster JWT (received in `enrolled` reply)
+#   /caddy/caddy/.../*.crt  TLS cert (provisioned by Caddy)
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: edge-caddy
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    environment:
+      EDGE_HOSTNAME: ${EDGE_HOSTNAME:?EDGE_HOSTNAME must be set in .env}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:?CADDY_ACME_EMAIL must be set in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+    restart: unless-stopped
+
+  edge:
+    # The Track-B edge image. Built from kixelated/service-video-mesh
+    # with MESH_BUILD_ROLE=edge baked in, so it refuses to start under
+    # NODE_ROLE=leader. Image is public on GHCR.
+    image: ${EDGE_IMAGE:-ghcr.io/bozp-pzob/service-video-mesh-edge:latest}
+    container_name: edge-node
+    environment:
+      LISTEN_HOST: 0.0.0.0
+      LISTEN_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      IDENTITY_PATH: /app/data/identity.json
+
+      LEADER_URL: ${LEADER_URL:?LEADER_URL must be set in .env}
+      LEADER_PUBKEY: ${LEADER_PUBKEY:-}
+      EDGE_PUBLIC_URL: https://${EDGE_HOSTNAME}
+      MOQ_EDGE_RELAY_URL: https://${EDGE_HOSTNAME}:4443
+
+      EDGE_MAX_CONSUMERS: ${EDGE_MAX_CONSUMERS:-500}
+      EDGE_MAX_EGRESS_BPS: ${EDGE_MAX_EGRESS_BPS:-0}
+      EDGE_PAYOUT_ADDRESS: ${EDGE_PAYOUT_ADDRESS:-}
+
+      # Shared volume paths — must agree with moq-relay below.
+      EDGE_CLUSTER_TOKEN_PATH: /app/data/shared/cluster.jwt
+      EDGE_JWKS_DIR: /app/data/shared/jwks
+    volumes:
+      - edge-data:/app/data
+      - relay-shared:/app/data/shared
+    networks:
+      - edge
+    restart: unless-stopped
+
+  moq-relay:
+    image: ${MOQ_RELAY_IMAGE:-mesh-moq-relay:edge-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.moq-relay
+    container_name: edge-moq-relay
+    # Caddy's LE cert is mode 0600 root:root.
+    user: "0:0"
+    environment:
+      EDGE_HOSTNAME: ${EDGE_HOSTNAME}
+      # The entrypoint script parses LEADER_URL to a host:port and
+      # passes --cluster-root itself, so the operator only configures
+      # one URL across the whole stack.
+      LEADER_URL: ${LEADER_URL}
+      MALLOC_CONF: prof:false
+      _RJEM_MALLOC_CONF: prof:false
+    command:
+      - --server-bind
+      - "[::]:4443"
+      - --tls-cert
+      - /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${EDGE_HOSTNAME}/${EDGE_HOSTNAME}.crt
+      - --tls-key
+      - /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${EDGE_HOSTNAME}/${EDGE_HOSTNAME}.key
+      # The leader's /v1/jwks public keys, mirrored here by the edge-node.
+      - --auth-key-dir
+      - /data/jwks
+      # The cluster JWT was minted by the leader and shipped to us
+      # inside the `enrolled` mesh-protocol response; the edge-node
+      # writes it to disk at /data/cluster.jwt. --cluster-root is
+      # injected by entrypoint.sh from LEADER_URL.
+      - --cluster-node
+      - "${EDGE_HOSTNAME}:4443"
+      - --cluster-token
+      - /data/cluster.jwt
+    ports:
+      - "4443:4443/udp"
+    volumes:
+      - caddy-data:/caddy:ro
+      - relay-shared:/data:ro
+    networks:
+      - edge
+    depends_on:
+      - caddy
+      - edge
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:
+  edge-data:
+  relay-shared:
+
+networks:
+  edge:
+    driver: bridge

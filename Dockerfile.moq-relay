@@ -1,0 +1,45 @@
+# Build moq-relay from source. The upstream moqdev/moq-relay Docker
+# images crash on startup with a jemalloc profiler bug across every
+# tag we've tested, so we compile with --no-default-features and the
+# `quinn` feature alone (which is what we actually use).
+
+FROM rust:1.88-bookworm AS build
+
+WORKDIR /src
+
+# Pin a known-good upstream revision. Update intentionally — moq's
+# protocol evolves fast and a floating HEAD will eventually break
+# wire compatibility with the leader's relay.
+ARG MOQ_REV=main
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates pkg-config \
+ && rm -rf /var/lib/apt/lists/* \
+ && git clone --depth 1 https://github.com/kixelated/moq.git . \
+ && git fetch --depth 1 origin "$MOQ_REV" \
+ && git checkout "$MOQ_REV" || true
+
+RUN cargo build \
+    --release \
+    --package moq-relay \
+    --no-default-features \
+    --features quinn
+
+# ── Runtime stage ────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/release/moq-relay /usr/local/bin/moq-relay
+
+# Wait-for-files wrapper. The edge-node populates /data/jwks/ and
+# /data/cluster.jwt at boot (after enrolling with the leader); Caddy
+# writes the LE cert to a shared volume; we can't start the relay
+# until all three exist. Polling with a 3s tick is plenty — the edge
+# typically has them ready inside 10s of compose-up.
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

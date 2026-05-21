@@ -1,0 +1,24 @@
+# Caddy on the edge does two things:
+#   1. Provisions an LE cert for {$EDGE_HOSTNAME}, stored under
+#      /data/caddy/certificates/.../. moq-relay reads the cert file
+#      directly from this shared volume.
+#   2. Terminates HTTPS on tcp/443 for the edge node's /v1/... surface
+#      (mostly /v1/healthz today; the edge isn't user-facing on HTTP).
+#
+# UDP/4443 is moq-relay's own listener — Caddy isn't in that path.
+
+{
+    email {$CADDY_ACME_EMAIL}
+}
+
+{$EDGE_HOSTNAME} {
+    encode zstd gzip
+
+    handle /v1/* {
+        reverse_proxy edge:8080
+    }
+
+    handle {
+        respond "edge node" 200
+    }
+}
