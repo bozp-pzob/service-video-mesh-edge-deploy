@@ -1,6 +1,6 @@
 #!/bin/sh
 # Wait for the edge-node + caddy to produce everything the relay needs,
-# then exec moq-relay with --cluster-root derived from LEADER_URL so
+# then exec moq-relay with --cluster-connect derived from LEADER_URL so
 # the operator only has to set the URL in one place.
 #
 # Required env:
@@ -18,9 +18,9 @@ CERT_DIR="/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${EDG
 CERT_PATH="${CERT_DIR}/${EDGE_HOSTNAME}.crt"
 
 # Strip scheme + path + trailing slash from LEADER_URL → bare host(:port).
-# moq-relay's --cluster-root wants a host:port pair, so default to :4443
-# (the QUIC listener port the leader's relay uses) if the URL didn't
-# carry one.
+# moq-relay's --cluster-connect wants a host:port pair, so default to
+# :4443 (the QUIC listener port the leader's relay uses) if the URL
+# didn't carry one.
 LEADER_HOST_PORT=$(printf '%s' "$LEADER_URL" | sed -E 's@^https?://@@; s@/.*$@@')
 case "$LEADER_HOST_PORT" in
   *:*) ;;
@@ -48,5 +48,5 @@ done
 
 echo "moq-relay: all dependencies ready, starting"
 exec /usr/local/bin/moq-relay \
-  --cluster-root "$LEADER_HOST_PORT" \
+  --cluster-connect "$LEADER_HOST_PORT" \
   "$@"

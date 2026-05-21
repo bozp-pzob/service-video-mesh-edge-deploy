@@ -90,10 +90,8 @@ services:
       - /data/jwks
       # The cluster JWT was minted by the leader and shipped to us
       # inside the `enrolled` mesh-protocol response; the edge-node
-      # writes it to disk at /data/cluster.jwt. --cluster-root is
+      # writes it to disk at /data/cluster.jwt. --cluster-connect is
       # injected by entrypoint.sh from LEADER_URL.
-      - --cluster-node
-      - "${EDGE_HOSTNAME}:4443"
       - --cluster-token
       - /data/cluster.jwt
     ports:
